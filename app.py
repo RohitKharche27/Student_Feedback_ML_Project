@@ -3,217 +3,257 @@ import pandas as pd
 import numpy as np
 import pickle
 import io
-from sklearn.preprocessing import StandardScaler
+from typing import List
 
-st.set_page_config(page_title="Student Prediction App", layout="centered")
-
-st.title("Student Prediction (Logistic Regression) — Streamlit App")
-st.write(
-    "Load the trained model (`Student_model.pkl`) and dataset (`ML_RAW_DATASET_CLEANED.xlsx`) "
-    "or upload them below. Enter features to get a prediction and probability."
-)
+st.set_page_config(page_title="Student Prediction (dynamic inputs)", layout="centered")
+st.title("Student Prediction — Streamlit App (auto-detects model features)")
 
 @st.cache_data
-def load_model_from_file(path):
-    with open(path, "rb") as f:
-        model = pickle.load(f)
-    return model
+def load_model(path_or_file):
+    try:
+        if hasattr(path_or_file, "read"):
+            # file-like (uploaded)
+            return pickle.load(path_or_file)
+        else:
+            with open(path_or_file, "rb") as f:
+                return pickle.load(f)
+    except Exception as e:
+        raise
 
 @st.cache_data
-def load_excel(path):
-    return pd.read_excel(path)
+def load_excel(path_or_file):
+    if hasattr(path_or_file, "read"):
+        return pd.read_excel(path_or_file)
+    else:
+        return pd.read_excel(path_or_file)
 
-def try_load_local_files():
+# Try load local files
+model = None
+df = None
+try:
+    model = load_model("Student_model.pkl")
+    st.sidebar.success("Loaded Student_model.pkl")
+except Exception:
     model = None
+try:
+    df = load_excel("ML_RAW_DATASET_CLEANED.xlsx")
+    st.sidebar.success("Loaded ML_RAW_DATASET_CLEANED.xlsx")
+except Exception:
     df = None
-    # Try local filenames (common when you deploy with files in repo)
-    try:
-        model = load_model_from_file("Student_model.pkl")
-        st.success("Loaded model from Student_model.pkl")
-    except Exception:
-        model = None
 
-    try:
-        df = load_excel("ML_RAW_DATASET_CLEANED.xlsx")
-        st.success("Loaded dataset from ML_RAW_DATASET_CLEANED.xlsx")
-    except Exception:
-        df = None
-
-    return model, df
-
-model, df = try_load_local_files()
-
-st.sidebar.header("Files / Uploads")
-
+st.sidebar.header("Uploads")
 if model is None:
-    uploaded_model = st.sidebar.file_uploader(
-        "Upload `Student_model.pkl` (Pickle file)", type=["pkl", "pickle"]
-    )
+    uploaded_model = st.sidebar.file_uploader("Upload Student_model.pkl", type=["pkl", "pickle"])
     if uploaded_model is not None:
         try:
-            model = pickle.load(uploaded_model)
-            st.sidebar.success("Model uploaded and loaded.")
+            model = load_model(uploaded_model)
+            st.sidebar.success("Model uploaded")
         except Exception as e:
             st.sidebar.error(f"Could not load model: {e}")
 
 if df is None:
-    uploaded_data = st.sidebar.file_uploader(
-        "Upload dataset `ML_RAW_DATASET_CLEANED.xlsx` (optional, used for defaults and stats)",
-        type=["xlsx", "xls", "csv"],
-    )
+    uploaded_data = st.sidebar.file_uploader("Upload dataset (optional)", type=["xlsx", "xls", "csv"])
     if uploaded_data is not None:
         try:
-            # uploaded_data may be BytesIO
-            if str(uploaded_data.type).startswith("application/vnd.ms-excel") or uploaded_data.name.endswith((".xls", ".xlsx")):
-                df = pd.read_excel(uploaded_data)
+            if uploaded_data.name.lower().endswith((".xls", ".xlsx")):
+                df = load_excel(uploaded_data)
             else:
                 df = pd.read_csv(uploaded_data)
-            st.sidebar.success("Dataset uploaded and loaded.")
+            st.sidebar.success("Dataset uploaded")
         except Exception as e:
             st.sidebar.error(f"Could not load dataset: {e}")
 
 st.markdown("---")
 
-# If dataset is available show a bit of it and compute defaults
-if df is not None:
-    st.subheader("Dataset preview & stats")
-    # show first rows
-    st.dataframe(df.head(8))
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    if numeric_cols:
-        st.markdown("**Numeric summary statistics (from dataset):**")
-        st.dataframe(df[numeric_cols].describe().T)
-    # Try to infer feature ranges
-    def get_default(col, fallback=0):
+if model is None:
+    st.warning("No model loaded yet. Upload `Student_model.pkl` in the sidebar or place it in the app folder.")
+    st.stop()
+
+# Determine model input feature info
+n_features_expected = getattr(model, "n_features_in_", None)
+model_feature_names: List[str] = []
+if hasattr(model, "feature_names_in_"):
+    try:
+        model_feature_names = list(model.feature_names_in_)
+    except Exception:
+        model_feature_names = []
+elif hasattr(model, "coef_") and hasattr(model, "classes_"):
+    # fallback guess: cannot reliably infer names
+    model_feature_names = []
+
+# If sklearn didn't store names, create generic names
+if n_features_expected is None:
+    # fallback - try to infer from model if possible, else assume 3 (age, salary, experience)
+    n_features_expected = 3
+
+if not model_feature_names:
+    # create generic names
+    model_feature_names = [f"feature_{i+1}" for i in range(n_features_expected)]
+else:
+    # if feature_names exist but length mismatch, adjust
+    if len(model_feature_names) != n_features_expected:
+        # ensure lengths match
+        if len(model_feature_names) < n_features_expected:
+            # pad generic names
+            extra = [f"feature_{i+1}" for i in range(len(model_feature_names), n_features_expected)]
+            model_feature_names = model_feature_names + extra
+        elif len(model_feature_names) > n_features_expected:
+            model_feature_names = model_feature_names[:n_features_expected]
+
+st.info(f"Model expects **{n_features_expected}** features: `{', '.join(model_feature_names)}`")
+
+# Helper: get sensible defaults from dataset if available
+def default_for(col_name, fallback=0.0):
+    if df is None:
+        return float(fallback)
+    # try exact col match or fuzzy
+    if col_name in df.columns:
         try:
-            return float(df[col].mean())
+            return float(df[col_name].dropna().astype(float).mean())
         except Exception:
             return float(fallback)
-else:
-    st.info("No dataset loaded. You can upload `ML_RAW_DATASET_CLEANED.xlsx` in the sidebar to get defaults and stats.")
+    # fuzzy match by lower-case substring
+    lc = col_name.lower()
+    for c in df.columns:
+        if lc in c.lower():
+            try:
+                return float(df[c].dropna().astype(float).mean())
+            except Exception:
+                continue
+    return float(fallback)
 
-st.markdown("## Input features")
+st.header("Enter feature values")
 
-# Assume features are: age, salary, experience (as you mentioned). Use dataset to suggest ranges if available.
-if df is not None:
-    # Try common column names
-    possible_age_cols = [c for c in df.columns if "age" in c.lower()] or []
-    possible_salary_cols = [c for c in df.columns if "sal" in c.lower() or "salary" in c.lower()] or []
-    possible_exp_cols = [c for c in df.columns if "exp" in c.lower() or "experience" in c.lower()] or []
-else:
-    possible_age_cols = possible_salary_cols = possible_exp_cols = []
-
-# Defaults and min/max
-def col_stats(cols, default_min, default_max, default_mean):
-    if not cols:
-        return default_min, default_max, default_mean
-    col = cols[0]
-    try:
-        s = df[col].dropna().astype(float)
-        return float(s.min()), float(s.max()), float(s.mean())
-    except Exception:
-        return default_min, default_max, default_mean
-
-age_min, age_max, age_mean = col_stats(possible_age_cols, 10, 80, 30)
-sal_min, sal_max, sal_mean = col_stats(possible_salary_cols, 0, 200000, 30000)
-exp_min, exp_max, exp_mean = col_stats(possible_exp_cols, 0, 50, 5)
-
-age = st.number_input("Age", min_value=float(age_min), max_value=float(age_max), value=float(round(age_mean,0)))
-salary = st.number_input("Salary", min_value=float(sal_min), max_value=float(sal_max), value=float(round(sal_mean,0)))
-experience = st.number_input("Experience (years)", min_value=float(exp_min), max_value=float(exp_max), value=float(round(exp_mean,0)))
+# Create inputs dynamically
+user_inputs = {}
+for fname in model_feature_names:
+    # choose numeric input by default
+    default_val = default_for(fname, 0.0)
+    # try to get a reasonable min/max from df if possible
+    minv, maxv = None, None
+    if df is not None:
+        # fuzzy locate column
+        found = None
+        if fname in df.columns:
+            found = fname
+        else:
+            for c in df.columns:
+                if fname.lower() in c.lower() or c.lower() in fname.lower():
+                    found = c
+                    break
+        if found is not None:
+            try:
+                s = df[found].dropna().astype(float)
+                minv, maxv = float(s.min()), float(s.max())
+            except Exception:
+                minv, maxv = None, None
+    # render numeric input; if ranges available use them
+    label = f"{fname} (auto)"
+    if minv is not None and maxv is not None:
+        user_val = st.number_input(label, min_value=minv, max_value=maxv, value=float(round(default_val, 2)))
+    else:
+        user_val = st.number_input(label, value=float(round(default_val, 2)))
+    user_inputs[fname] = float(user_val)
 
 st.markdown("---")
 
-# Button for single prediction
-if st.button("Predict"):
-    if model is None:
-        st.error("No model loaded. Upload `Student_model.pkl` in the sidebar or place it in the app folder.")
-    else:
-        # Prepare input vector. We'll try to match the order expected by the model:
-        # If the model was trained with features order [age, salary, experience]
-        X = np.array([[age, salary, experience]], dtype=float)
-
-        # If model expects scaled input, either the model pipeline includes the scaler
-        # or we assume raw. We'll try to detect if model has 'predict_proba' and accepts shape.
-        try:
+# Single prediction
+if st.button("Predict single row"):
+    X = np.array([ [user_inputs[f] for f in model_feature_names] ], dtype=float)
+    st.write("Input array shape:", X.shape)
+    try:
+        if hasattr(model, "predict_proba"):
             proba = model.predict_proba(X)
-            class_idx = np.argmax(proba, axis=1)[0]
-            pred_class = model.classes_[class_idx] if hasattr(model, "classes_") else int(class_idx)
-            st.success(f"Predicted class: **{pred_class}**")
-            st.write(f"Probabilities: {dict(zip(model.classes_, proba[0]))}" if hasattr(model, "classes_") else f"Probabilities: {proba[0]}")
-        except Exception as e:
-            # Sometimes model is a pipeline or expects different shape — try feeble fallback
-            try:
-                pred = model.predict(X)
-                st.success(f"Predicted class: **{pred[0]}**")
-                # if no predict_proba, show only prediction
-            except Exception as e2:
-                st.error(f"Model failed to predict. Error: {e} / {e2}")
+            pred = model.predict(X)
+            st.success(f"Prediction: **{pred[0]}**")
+            # show probability of predicted class
+            if hasattr(model, "classes_"):
+                class_probs = dict(zip(map(str, model.classes_), proba[0].round(4)))
+                st.write("Probabilities:", class_probs)
+            else:
+                st.write("Probabilities:", proba[0].round(4))
+        else:
+            pred = model.predict(X)
+            st.success(f"Prediction: **{pred[0]}** (model has no predict_proba)")
+    except Exception as e:
+        st.error(f"Model failed to predict. Error: {e}")
+        st.info("Common causes: wrong feature order, categorical features encoded differently, or model expects encoded/dummy features.")
 
-# Batch predict: allow the user to upload a CSV of new rows
-st.markdown("## Batch predictions (CSV)")
-st.write("Upload a CSV with columns `age`, `salary`, `experience` (or similar). The app will try to map columns by name.")
+# Batch prediction
+st.markdown("## Batch predictions (CSV upload)")
+st.write("Upload a CSV with columns corresponding to the model's feature names. If names differ, map columns in the next step.")
+batch_file = st.file_uploader("Upload CSV for batch prediction", type=["csv"], key="batch_csv")
 
-batch_file = st.file_uploader("Upload CSV for batch predictions", type=["csv"], key="batch_csv")
 if batch_file is not None:
     try:
         batch_df = pd.read_csv(batch_file)
-        st.write("Uploaded preview:")
-        st.dataframe(batch_df.head())
-        # Try to find columns
-        # find columns containing age/sal/exp
-        def find_col(df, keywords):
-            for c in df.columns:
-                lc = c.lower()
-                for kw in keywords:
-                    if kw in lc:
-                        return c
-            return None
+    except Exception:
+        batch_df = pd.read_csv(batch_file, encoding="latin1")
+    st.write("Preview of uploaded CSV:")
+    st.dataframe(batch_df.head())
 
-        age_col = find_col(batch_df, ["age"])
-        sal_col = find_col(batch_df, ["sal", "salary", "income", "pay"])
-        exp_col = find_col(batch_df, ["exp", "experience", "years"])
+    # Attempt auto-mapping
+    mapping = {}
+    detected = []
+    for fname in model_feature_names:
+        # find best-matching column in CSV
+        match = None
+        for c in batch_df.columns:
+            if c == fname:
+                match = c
+                break
+        if match is None:
+            # substring match
+            for c in batch_df.columns:
+                if fname.lower() in c.lower() or c.lower() in fname.lower():
+                    match = c
+                    break
+        if match:
+            mapping[fname] = match
+            detected.append(fname)
 
-        missing = []
-        if age_col is None:
-            missing.append("age")
-        if sal_col is None:
-            missing.append("salary")
-        if exp_col is None:
-            missing.append("experience")
+    st.write(f"Auto-detected mapping for: {detected}")
 
-        if missing:
-            st.warning(f"Could not auto-detect these columns: {missing}. You may need to rename columns before uploading.")
-        else:
-            X_batch = batch_df[[age_col, sal_col, exp_col]].astype(float).values
-            if model is None:
-                st.error("No model loaded.")
+    # Show mapping UI for any unmapped features
+    unmapped = [f for f in model_feature_names if f not in mapping]
+    if unmapped:
+        st.warning(f"Could not auto-detect columns for: {unmapped}. Please map them manually (or rename CSV columns).")
+        st.write("Map CSV columns to model features:")
+        for f in unmapped:
+            choice = st.selectbox(f"Column for model feature `{f}`", options=["--none--"] + list(batch_df.columns), key=f"map_{f}")
+            if choice != "--none--":
+                mapping[f] = choice
+
+    # confirm all mapped
+    if set(mapping.keys()) == set(model_feature_names):
+        # Build X in correct order
+        X_batch = batch_df[[mapping[f] for f in model_feature_names]].astype(float).values
+        st.write("Built input matrix for model with shape", X_batch.shape)
+        try:
+            if hasattr(model, "predict_proba"):
+                probs = model.predict_proba(X_batch)
+                preds = model.predict(X_batch)
+                out = batch_df.copy()
+                out["prediction"] = preds
+                # attach probability for predicted class
+                pred_probs = [probs[i, np.argmax(probs[i])] for i in range(len(probs))]
+                out["pred_prob"] = pred_probs
+                st.success("Batch prediction done.")
+                st.dataframe(out.head(20))
+                csv = out.to_csv(index=False).encode("utf-8")
+                st.download_button("Download predictions CSV", data=csv, file_name="batch_predictions.csv", mime="text/csv")
             else:
-                try:
-                    if hasattr(model, "predict_proba"):
-                        probs = model.predict_proba(X_batch)
-                        preds = model.predict(X_batch)
-                        out = batch_df.copy()
-                        out["prediction"] = preds
-                        # attach probability for predicted class
-                        pred_probs = [probs[i, np.argmax(probs[i])] for i in range(len(probs))]
-                        out["pred_prob"] = pred_probs
-                        st.success("Batch prediction done.")
-                        st.dataframe(out.head(20))
-                        csv = out.to_csv(index=False).encode("utf-8")
-                        st.download_button("Download predictions CSV", data=csv, file_name="predictions.csv", mime="text/csv")
-                    else:
-                        preds = model.predict(X_batch)
-                        out = batch_df.copy()
-                        out["prediction"] = preds
-                        st.success("Batch prediction done (no probabilities available).")
-                        st.dataframe(out.head(20))
-                        csv = out.to_csv(index=False).encode("utf-8")
-                        st.download_button("Download predictions CSV", data=csv, file_name="predictions.csv", mime="text/csv")
-                except Exception as e:
-                    st.error(f"Batch prediction failed: {e}")
-    except Exception as e:
-        st.error(f"Could not read CSV: {e}")
+                preds = model.predict(X_batch)
+                out = batch_df.copy()
+                out["prediction"] = preds
+                st.success("Batch prediction done (no probabilities).")
+                st.dataframe(out.head(20))
+                csv = out.to_csv(index=False).encode("utf-8")
+                st.download_button("Download predictions CSV", data=csv, file_name="batch_predictions.csv", mime="text/csv")
+        except Exception as e:
+            st.error(f"Batch prediction failed: {e}")
+    else:
+        st.error("Not all model features are mapped. Map remaining features to columns and try again.")
 
 st.markdown("---")
-st.caption("Tips: If your model was trained on scaled features, put the scaler and model into a single pipeline before pickling (e.g. sklearn.pipeline.Pipeline). That avoids having to scale at inference time.")
+st.caption("If your model expects encoded categorical features (one-hot, label-encoded), make sure to provide the same encoding at inference time or pickle the whole preprocessing pipeline together with the model.")
