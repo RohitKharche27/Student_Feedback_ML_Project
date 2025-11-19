@@ -1,0 +1,2 @@
+# Student_Feedback_ML_Project
+A Flask-based ML app using a trained Logistic Regression model (Student_model.pkl) to predict feedback from inputs like age, salary, and experience. The model is loaded with Pickle, and app.py handles routes for real-time predictions. Easy to extend and ideal for learning ML deployment.
